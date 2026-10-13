@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from typing import Any, Optional
 from urllib.parse import quote
@@ -12,6 +13,10 @@ from open_webui.env import (
     FORWARD_USER_INFO_HEADER_USER_ID,
     FORWARD_USER_INFO_HEADER_USER_NAME,
     FORWARD_USER_INFO_HEADER_USER_ROLE,
+)
+from open_webui.utils.chat_variables import (
+    CHAT_VARIABLE_KEY_RE,
+    normalize_user_variables,
 )
 from open_webui.models.groups import Groups
 
@@ -142,13 +147,48 @@ def parse_custom_headers(
         '{{USER_GROUP_IDS}}': ','.join(group.id for group in user_groups) if user_groups else '',
         '{{USER_AGENT}}': user_agent,
     }
+    custom_vars = {}
+
+    for name, value in normalize_user_variables(
+        getattr(user, 'variables', {}) if user else {}
+    ).items():
+        if not CHAT_VARIABLE_KEY_RE.fullmatch(name):
+            continue
+
+        custom_vars[f'{{{{{name}}}}}'] = value
+        custom_vars[f'{{{{user.variables.{name}}}}}'] = value
+
+    # Built-in values take priority over any custom token collision.
+    replacements = {**custom_vars, **template_vars}
+
+    token_pattern = re.compile(
+        r'\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}'
+    )
+
+    def replace_token(match: re.Match) -> str:
+        token = '{{' + match.group(1) + '}}'
+
+        if token not in replacements:
+            return match.group(0)
+
+        replacement = replacements[token]
+
+        # Multiline variables may be useful in prompts but aren't valid
+        # as HTTP header values.
+        if token in custom_vars and token not in template_vars:
+            if '\r' in replacement or '\n' in replacement:
+                raise ValueError(
+                    f'User variable {match.group(1)} contains a newline '
+                    'and cannot be used in a header.'
+                )
+
+        return replacement
 
     parsed_headers = {}
     for key, value in custom_headers.items():
         if not isinstance(value, str):
             value = str(value)
-        for token, val in template_vars.items():
-            value = value.replace(token, val)
-        parsed_headers[key] = value
+
+        parsed_headers[key] = token_pattern.sub(replace_token, value)
 
     return parsed_headers
