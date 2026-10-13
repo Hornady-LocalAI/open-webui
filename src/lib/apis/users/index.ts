@@ -574,6 +574,7 @@ type UserUpdateForm = {
 	email: string;
 	name: string;
 	password: string;
+	variables?: Record<string, string>;
 };
 
 export const updateUserById = async (token: string, userId: string, user: UserUpdateForm) => {
@@ -590,7 +591,8 @@ export const updateUserById = async (token: string, userId: string, user: UserUp
 			role: user.role,
 			email: user.email,
 			name: user.name,
-			password: user.password !== '' ? user.password : undefined
+			password: user.password !== '' ? user.password : undefined,
+			variables: user.variables
 		})
 	})
 		.then(async (res) => {
@@ -608,6 +610,28 @@ export const updateUserById = async (token: string, userId: string, user: UserUp
 	}
 
 	return res;
+};
+
+export const getUserVariablesById = async (
+	token: string,
+	userId: string
+): Promise<{ variables: Record<string, string> }> => {
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/users/${encodeURIComponent(userId)}/variables`,
+		{
+			method: 'GET',
+			headers: {
+				Authorization: `Bearer ${token}`
+			}
+		}
+	);
+
+	if (!response.ok) {
+		const error = await response.json().catch(() => null);
+		throw new Error(error?.detail ?? 'Unable to load user variables.');
+	}
+
+	return response.json();
 };
 
 export const getUserGroupsById = async (token: string, userId: string) => {

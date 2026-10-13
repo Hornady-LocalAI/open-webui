@@ -909,6 +909,29 @@ async def get_user_active_status_by_id(
 
 
 ############################
+# GetUserVariablesById
+############################
+
+
+@router.get('/{user_id}/variables', response_model=UserVariablesResponse)
+async def get_user_variables_by_id(
+    user_id: str,
+    session_user: UserModel = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    target_user = await Users.get_user_by_id(user_id, db=db)
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.USER_NOT_FOUND,
+        )
+
+    return UserVariablesResponse(
+        variables=normalize_user_variables(target_user.variables)
+    )
+
+
+############################
 # UpdateUserById
 ############################
 
@@ -952,6 +975,20 @@ async def update_user_by_id(
     user = await Users.get_user_by_id(user_id, db=db)
 
     if user:
+        variables_provided = 'variables' in form_data.model_fields_set
+        validated_variables = None
+
+        if variables_provided:
+            try:
+                validated_variables = validate_user_variables(
+                    form_data.variables
+                )
+            except ChatVariablesError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=str(exc),
+                ) from exc
+
         if form_data.email is not None and form_data.email.lower() != user.email:
             email_user = await Users.get_user_by_email(form_data.email.lower(), db=db)
             if email_user:
@@ -972,6 +1009,8 @@ async def update_user_by_id(
 
         # Build update dict from only the provided fields
         update_data = {}
+        if variables_provided:
+            update_data['variables'] = validated_variables
         if form_data.role is not None:
             update_data['role'] = form_data.role
         if form_data.name is not None:
