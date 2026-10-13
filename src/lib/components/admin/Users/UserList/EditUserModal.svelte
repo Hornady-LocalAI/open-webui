@@ -6,7 +6,7 @@
 
 	import { goto } from '$app/navigation';
 
-	import { updateUserById, getUserGroupsById } from '$lib/apis/users';
+	import { updateUserById, getUserGroupsById, getUserVariablesById } from '$lib/apis/users';
 
 	import Modal from '$lib/components/common/Modal.svelte';
 	import localizedFormat from 'dayjs/plugin/localizedFormat';
@@ -26,11 +26,45 @@
 		init();
 	}
 
-	const init = () => {
-		if (selectedUser) {
-			_user = selectedUser;
-			_user.password = '';
-			loadUserGroups();
+	const init = async () => {
+		const loadId = ++variablesLoadId;
+
+		variablesLoaded = false;
+		variablesLoadError = '';
+		variablesJson = '{}';
+
+		if (!selectedUser) return;
+
+		const userId = selectedUser.id;
+
+		// Work on a copy so unsaved edits don't change the user list.
+		_user = { ...selectedUser, password: '' };
+		loadUserGroups();
+
+		try {
+			const result = await getUserVariablesById(
+				localStorage.token,
+				userId
+			);
+
+			// Ignore a response if the editor has switched users or closed.
+			if (
+				loadId !== variablesLoadId ||
+				!show ||
+				selectedUser?.id !== userId
+			) return;
+
+			variablesJson = JSON.stringify(result.variables, null, 2);
+			variablesLoaded = true;
+		} catch (error) {
+			if (
+				loadId !== variablesLoadId ||
+				!show ||
+				selectedUser?.id !== userId
+			) return;
+
+			variablesLoadError =
+				error instanceof Error ? error.message : String(error);
 		}
 	};
 
@@ -41,17 +75,67 @@
 		email: '',
 		password: ''
 	};
+	let variablesJson = '{}';
+	let variablesLoaded = false;
+	let variablesLoadError = '';
+	let variablesLoadId = 0;
+	let saving = false;
 
 	let userGroups: any[] | null = null;
 
 	const submitHandler = async () => {
-		const res = await updateUserById(localStorage.token, selectedUser.id, _user).catch((error) => {
-			toast.error(`${error}`);
-		});
+		if (!variablesLoaded || saving) return;
 
-		if (res) {
-			dispatch('save');
-			show = false;
+		let variables: Record<string, string>;
+
+		try {
+			const parsed: unknown = JSON.parse(variablesJson);
+
+			if (
+				parsed === null ||
+				typeof parsed !== 'object' ||
+				Array.isArray(parsed)
+			) {
+				throw new Error('Variables must be a JSON object.');
+			}
+
+			for (const [key, value] of Object.entries(parsed)) {
+				if (!/^[a-z][a-z0-9_]*$/.test(key)) {
+					throw new Error(
+						`Invalid key "${key}". Use lowercase letters, numbers, and underscores; start with a letter.`
+					);
+				}
+
+				if (typeof value !== 'string') {
+					throw new Error(`The value for "${key}" must be a string.`);
+				}
+			}
+
+			variables = parsed as Record<string, string>;
+		} catch (error) {
+			toast.error(
+				error instanceof Error ? error.message : 'Invalid variables JSON.'
+			);
+			return;
+		}
+
+		saving = true;
+
+		try {
+			const result = await updateUserById(
+				localStorage.token,
+				selectedUser.id,
+				{ ..._user, variables }
+			);
+
+			if (result) {
+				dispatch('save');
+				show = false;
+			}
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : String(error));
+		} finally {
+			saving = false;
 		}
 	};
 
@@ -218,10 +302,50 @@
 							</div>
 						</div>
 
+						<div class="mt-4">
+							<label
+								for="admin-user-variables"
+								class="mb-1 block text-xs text-gray-500"
+							>
+								{$i18n.t('User Variables (JSON)')}
+							</label>
+
+							<textarea
+								id="admin-user-variables"
+								class="w-full rounded-lg border border-gray-200 bg-transparent p-2 font-mono text-xs dark:border-gray-700"
+								rows="8"
+								spellcheck="false"
+								bind:value={variablesJson}
+								disabled={!variablesLoaded || saving}
+							></textarea>
+
+							{#if variablesLoadError}
+								<p class="mt-1 text-xs text-red-500" role="alert">
+									{variablesLoadError}
+								</p>
+								<button
+									type="button"
+									class="mt-1 text-xs underline"
+									on:click={() => init()}
+								>
+									{$i18n.t('Retry')}
+								</button>
+							{:else if !variablesLoaded}
+								<p class="mt-1 text-xs text-gray-500">
+									{$i18n.t('Loading variables...')}
+								</p>
+							{:else}
+								<p class="mt-1 text-xs text-gray-500">
+									{$i18n.t('Enter a JSON object with string values (Keys must be lowercase). Use {} to clear all variables.')}
+								</p>
+							{/if}
+						</div>
+
 						<div class="flex justify-end pt-3 text-sm font-normal">
 							<button
 								class="px-3.5 py-1.5 text-sm font-normal bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full flex flex-row space-x-1 items-center"
 								type="submit"
+								disabled={!variablesLoaded || saving}
 							>
 								{$i18n.t('Save')}
 							</button>
