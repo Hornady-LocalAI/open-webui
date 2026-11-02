@@ -25,6 +25,7 @@
 	import AddToolServerModal from '$lib/components/AddToolServerModal.svelte';
 	import AddTerminalServerModal from '$lib/components/AddTerminalServerModal.svelte';
 	import ExternalKnowledge from './ExternalKnowledge.svelte';
+	import McpKeyDatabase from './McpKeyDatabase.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
 	import AdminSettingRow from './AdminSettingRow.svelte';
 
@@ -235,6 +236,10 @@
 							{$i18n.t('Connect to your own OpenAPI compatible external tool servers.')}
 						</div>
 					</div>
+				</AdminSettingSection>
+
+				<AdminSettingSection title={$i18n.t('MCP Key Database')}>
+					<McpKeyDatabase />
 				</AdminSettingSection>
 
 				<AdminSettingSection title={$i18n.t('settings.admin.integrations.sections.terminal.title')}>

@@ -113,6 +113,7 @@ from open_webui.utils.headers import (
     include_user_info_headers,
     normalize_bearer_token,
 )
+from open_webui.utils import mcp_key_db
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.mcp.client import MCPClient, OAuthTokenAuth
 from open_webui.utils.misc import is_string_allowed
@@ -146,7 +147,7 @@ async def build_tool_server_headers(
 ) -> tuple[dict, dict]:
     """Build auth headers and cookies for a tool server connection.
 
-    Handles bearer, session, system_oauth, and oauth_2.1 auth types plus
+    Handles bearer, session, system_oauth, external_db, and oauth_2.1 auth types plus
     custom header interpolation and user-info forwarding.
     Shared by MCP and OpenAPI paths.
 
@@ -157,6 +158,7 @@ async def build_tool_server_headers(
     auth_type = connection.get('auth_type', 'bearer')
     headers = {}
     cookies = getattr(request, 'cookies', {}) if connection.get('forward_cookies', False) else {}
+    mcp_key = None
 
     if auth_type == 'bearer':
         headers.update(bearer_auth_header(connection.get('key', '')))
@@ -179,9 +181,17 @@ async def build_tool_server_headers(
         except Exception as e:
             log.error(f'Error getting OAuth token: {e}')
 
+    if mcp_key_db.uses_key_db(connection):
+        mcp_key = await mcp_key_db.get_mcp_key(user, connection) or ''
+        if mcp_key and auth_type == mcp_key_db.AUTH_TYPE and not mcp_key_db.uses_key_placeholder(connection):
+            headers.update(bearer_auth_header(mcp_key))
+
     # Interpolate template vars in custom connection headers
     connection_headers = connection.get('headers', None)
     if connection_headers and isinstance(connection_headers, dict):
+        # Fill the database key first, so it wins over a user variable of the same name.
+        if mcp_key is not None:
+            connection_headers = mcp_key_db.fill_key_placeholders(connection, connection_headers, mcp_key)
         for key, value in (await get_custom_headers(connection_headers, user, metadata)).items():
             headers['Authorization' if key.lower() == 'authorization' else key] = value
 

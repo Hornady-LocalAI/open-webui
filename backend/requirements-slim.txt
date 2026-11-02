@@ -37,6 +37,7 @@ sqlalchemy[asyncio]==2.0.50
 aiosqlite==0.22.1
 psycopg[binary]==3.3.4
 alembic==1.18.4
+pymssql==2.3.13
 
 pycrdt==0.14.8
 redis==8.0.1
