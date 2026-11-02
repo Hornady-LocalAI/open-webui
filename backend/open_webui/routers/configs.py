@@ -11,6 +11,7 @@ from open_webui.env import AIOHTTP_CLIENT_SESSION_SSL, AIOHTTP_CLIENT_TIMEOUT, E
 from open_webui.events import EVENTS, publish_event
 from open_webui.models.config import Config
 from open_webui.models.oauth_sessions import OAuthSessions
+from open_webui.utils import mcp_key_db
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.headers import bearer_auth_header, get_custom_headers
 from open_webui.utils.mcp.client import MCPClient
@@ -634,13 +635,32 @@ async def verify_tool_servers_config(request: Request, form_data: ToolServerConn
                                     token = oauth_token.get('access_token', '')
                         except Exception as e:
                             pass
+                    mcp_key = None
+                    connection = form_data.model_dump()
+                    if mcp_key_db.uses_key_db(connection):
+                        mcp_key = await mcp_key_db.get_mcp_key(user, connection)
+                        if not mcp_key:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    'The MCP key database has no key for your account with Server = '
+                                    f'"{mcp_key_db.connection_server_name(connection)}"'
+                                ),
+                            )
+                        if form_data.auth_type == mcp_key_db.AUTH_TYPE and not mcp_key_db.uses_key_placeholder(
+                            connection
+                        ):
+                            token = mcp_key
                     if token:
                         headers = {'Authorization': f'Bearer {token}'}
 
                     if form_data.headers and isinstance(form_data.headers, dict):
                         if headers is None:
                             headers = {}
-                        custom_headers = await get_custom_headers(form_data.headers, user)
+                        connection_headers = form_data.headers
+                        if mcp_key is not None:
+                            connection_headers = mcp_key_db.fill_key_placeholders(connection, connection_headers, mcp_key)
+                        custom_headers = await get_custom_headers(connection_headers, user)
                         headers.update(custom_headers)
 
                     await client.connect(form_data.url, headers=headers)
@@ -649,6 +669,8 @@ async def verify_tool_servers_config(request: Request, form_data: ToolServerConn
                         'status': True,
                         'specs': specs,
                     }
+                except HTTPException:
+                    raise
                 except Exception as e:
                     log.debug('Failed to create MCP client: %s', e)
                     raise HTTPException(
@@ -698,6 +720,92 @@ async def verify_tool_servers_config(request: Request, form_data: ToolServerConn
             status_code=400,
             detail=f'Failed to connect to the tool server',
         )
+
+
+############################
+# McpKeyDatabaseConfig
+############################
+
+
+class McpKeyDbConfigForm(BaseModel):
+    ENABLE: bool = False
+    HOST: str = ''
+    PORT: int = 1433
+    DATABASE: str = ''
+    USERNAME: str = ''
+    # None or empty keeps the saved password, so it never has to be sent back.
+    PASSWORD: str | None = None
+    QUERY: str = mcp_key_db.DEFAULT_QUERY
+    CACHE_TTL: int = 300
+    TIMEOUT: int = 10
+    # When set, overrides HOST/PORT/DATABASE/USERNAME/PASSWORD. Its password is
+    # sent to the browser masked, and the mask is swapped back on save.
+    CONNECTION_STRING: str = ''
+
+
+class McpKeyDbTestForm(McpKeyDbConfigForm):
+    EMAIL: str | None = None
+
+
+async def get_mcp_key_db_response() -> dict:
+    settings = await mcp_key_db.get_settings()
+    password_set = bool(settings.pop('PASSWORD'))
+    settings['CONNECTION_STRING'] = mcp_key_db.redact_connection_string(settings['CONNECTION_STRING'])
+    return {**settings, 'PASSWORD_SET': password_set}
+
+
+async def merge_mcp_key_db_settings(form_data: McpKeyDbConfigForm) -> dict:
+    saved = await mcp_key_db.get_settings()
+    settings = form_data.model_dump(exclude={'EMAIL'})
+    if not settings['PASSWORD']:
+        settings['PASSWORD'] = saved['PASSWORD']
+    settings['HOST'] = settings['HOST'].strip()
+    settings['CACHE_TTL'] = max(settings['CACHE_TTL'], 0)
+    settings['TIMEOUT'] = min(max(settings['TIMEOUT'], 1), 60)
+
+    connection_string = settings['CONNECTION_STRING'].strip()
+    if connection_string:
+        try:
+            connection_string = mcp_key_db.restore_connection_string(connection_string, saved['CONNECTION_STRING'])
+            mcp_key_db.parse_connection_string(connection_string)
+        except mcp_key_db.McpKeyDbError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    settings['CONNECTION_STRING'] = connection_string
+    return settings
+
+
+@router.get('/mcp_key_db')
+async def get_mcp_key_db_config(request: Request, user=Depends(get_admin_user)):
+    return await get_mcp_key_db_response()
+
+
+@router.post('/mcp_key_db')
+async def set_mcp_key_db_config(request: Request, form_data: McpKeyDbConfigForm, user=Depends(get_admin_user)):
+    settings = await merge_mcp_key_db_settings(form_data)
+    if settings['ENABLE'] and '@email' not in settings['QUERY'].lower():
+        raise HTTPException(status_code=400, detail='The query must use @email for the user email')
+
+    await Config.upsert({mcp_key_db.CONFIG_KEYS[field]: value for field, value in settings.items()})
+    mcp_key_db.clear_cache()
+    return await get_mcp_key_db_response()
+
+
+@router.post('/mcp_key_db/test')
+async def test_mcp_key_db_config(request: Request, form_data: McpKeyDbTestForm, user=Depends(get_admin_user)):
+    """Run the query for one email and report which servers it grants. Keys are never returned."""
+    settings = await merge_mcp_key_db_settings(form_data)
+    email = (form_data.EMAIL or '').strip() or user.email
+
+    try:
+        entitlements = await mcp_key_db.fetch_entitlements(settings, email)
+    except Exception as e:
+        log.info('MCP key database test failed: %s', f'{type(e).__name__}: {e}')
+        raise HTTPException(status_code=400, detail=f'Database test failed: {type(e).__name__}: {e}')
+
+    ignored = []
+    if settings['CONNECTION_STRING']:
+        ignored = mcp_key_db.parse_connection_string(settings['CONNECTION_STRING'])[1]
+    return {'email': email, 'servers': sorted(entitlements), 'ignored_options': ignored}
 
 
 ############################

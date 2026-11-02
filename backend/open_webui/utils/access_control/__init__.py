@@ -13,6 +13,7 @@ from open_webui.models.access_grants import (
 )
 from open_webui.models.groups import Groups
 from open_webui.models.users import UserModel
+from open_webui.utils.chat_variables import normalize_user_variables
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)
@@ -156,20 +157,42 @@ async def has_connection_access(
     based on ``config.access_grants`` within the connection dict.
 
     - Admin with BYPASS_ADMIN_ACCESS_CONTROL → always allowed
-    - Missing, None, or empty access_grants → private, admin-only
+    - ``config.access_variable`` set → user must have a non-empty user
+      variable with that name (for ``external_db`` connections it instead
+      names the database's server value, checked below)
+    - ``auth_type == 'external_db'``, or headers using ``{{MCP_KEY}}`` → the
+      MCP key database must return a key for this user whose server matches
+      the access variable, or the connection ID when none is set
+    - Missing, None, or empty access_grants → admin-only, unless one of the
+      checks above applies, in which case it alone grants access
     - access_grants has entries → delegates to ``has_access``
     """
     from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
+    from open_webui.utils import mcp_key_db
 
     if user.role == 'admin' and BYPASS_ADMIN_ACCESS_CONTROL:
         return True
 
-    access_grants = (connection.get('config') or {}).get('access_grants', [])
+    config = connection.get('config') or {}
+
+    access_variable = config.get('access_variable')
+    access_variable = access_variable.strip() if isinstance(access_variable, str) else ''
+
+    uses_key_db = mcp_key_db.uses_key_db(connection)
+    if uses_key_db:
+        if not await mcp_key_db.get_mcp_key(user, connection):
+            return False
+    elif access_variable and not normalize_user_variables(user.variables).get(access_variable, '').strip():
+        return False
+
+    access_grants = config.get('access_grants', [])
     if not access_grants:
         # No grants configured → private, admin-only: admins must keep access
         # to connections only they can configure, even when they do not bypass
-        # access control globally.
-        return user.role == 'admin'
+        # access control globally. A required access variable or key database
+        # lookup replaces the admin-only default, since it already restricts
+        # who can use it.
+        return bool(access_variable) or uses_key_db or user.role == 'admin'
 
     if user_group_ids is None:
         user_group_ids = {group.id for group in await Groups.get_groups_by_member_id(user.id, include_inherited=True)}
