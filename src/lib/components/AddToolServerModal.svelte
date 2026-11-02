@@ -55,6 +55,7 @@
 	let headers = '';
 
 	let functionNameFilterList = '';
+	let accessVariable = '';
 	let accessGrants = [];
 
 	let id = '';
@@ -218,7 +219,10 @@
 				key,
 				config: {
 					enable: enable,
-					access_grants: accessGrants
+					access_grants: accessGrants,
+					...(type === 'mcp' && accessVariable.trim()
+						? { access_variable: accessVariable.trim() }
+						: {})
 				},
 				info: {
 					id,
@@ -286,6 +290,7 @@
 				if (data.config) {
 					enable = data.config.enable ?? true;
 					accessGrants = data.config.access_grants ?? [];
+					accessVariable = data.config.access_variable ?? '';
 				}
 
 				if (data.info?.id) {
@@ -316,6 +321,10 @@
 				...(!direct && ['', 'openapi'].includes(type) ? { forward_cookies: forwardCookies } : {}),
 				headers: headers ? JSON.parse(headers) : undefined,
 				key,
+
+				...(type === 'mcp' && accessVariable.trim()
+					? { config: { access_variable: accessVariable.trim() } }
+					: {}),
 
 				info: {
 					id: id,
@@ -406,7 +415,10 @@
 			config: {
 				enable: enable,
 				function_name_filter_list: functionNameFilterList,
-				access_grants: accessGrants
+				access_grants: accessGrants,
+				...(type === 'mcp' && accessVariable.trim()
+					? { access_variable: accessVariable.trim() }
+					: {})
 			},
 			info: {
 				id: id,
@@ -459,6 +471,7 @@
 
 		enable = true;
 		functionNameFilterList = '';
+		accessVariable = '';
 		accessGrants = [];
 	};
 
@@ -489,6 +502,7 @@
 
 			enable = connection.config?.enable ?? true;
 			functionNameFilterList = connection.config?.function_name_filter_list ?? '';
+			accessVariable = connection.config?.access_variable ?? '';
 			accessGrants = connection.config?.access_grants ?? [];
 
 			if (connection.info?.id) {
@@ -799,6 +813,7 @@
 												{#if type === 'mcp'}
 													<option value="oauth_2.1">{$i18n.t('OAuth 2.1')}</option>
 													<option value="oauth_2.1_static">{$i18n.t('OAuth 2.1 (Static)')}</option>
+													<option value="external_db">{$i18n.t('Key Database')}</option>
 												{/if}
 											{/if}
 										</select>
@@ -822,6 +837,13 @@
 										{:else if auth_type === 'system_oauth'}
 											<div class={`text-xs self-center translate-y-[1px] text-gray-500`}>
 												{$i18n.t('Forwards system user OAuth access token to authenticate')}
+											</div>
+										{:else if auth_type === 'external_db'}
+											<div class={`text-xs self-center translate-y-[1px] text-gray-500`}>
+												{$i18n.t(
+													"Sends each user's key from the MCP key database as a Bearer token, or in a header that uses {{placeholder}} or the Access Variable. Only users with a key whose Server matches the Access Variable (or the connection ID) can use it.",
+													{ placeholder: '{{MCP_KEY}}' }
+												)}
 											</div>
 										{:else if auth_type === 'oauth_2.1'}
 											<div
@@ -1065,6 +1087,38 @@
 									/>
 								</div>
 							</div>
+
+							{#if type === 'mcp'}
+								<div class="flex flex-col w-full mt-2">
+									<label for="access-variable" class={`mb-1 text-xs text-gray-500`}
+										>{$i18n.t('Access Variable')}</label
+									>
+
+									<div class="flex-1">
+										<Tooltip
+											content={auth_type === 'external_db'
+												? $i18n.t(
+														'The Server value in the MCP key database that grants this connection. Only users with a key for it can access this connection. Reference the key in headers as {{placeholder}}.',
+														{ placeholder: `{{${accessVariable.trim() || 'NAME'}}}` }
+													)
+												: $i18n.t(
+														'Only users with a non-empty user variable of this name can access this connection. Reference it in headers as {{placeholder}}.',
+														{ placeholder: '{{user.variables.NAME}}' }
+													)}
+											placement="top-start"
+										>
+											<input
+												id="access-variable"
+												class={`w-full text-sm ${inputClass}`}
+												type="text"
+												bind:value={accessVariable}
+												placeholder={$i18n.t('Enter user variable name (e.g. erp)')}
+												autocomplete="off"
+											/>
+										</Tooltip>
+									</div>
+								</div>
+							{/if}
 						{/if}
 					</div>
 
