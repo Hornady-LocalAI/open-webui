@@ -2,8 +2,9 @@
 
 Connections with ``auth_type == 'external_db'`` look up the signed-in user's
 API key for that server from an admin-configured SQL Server database. A user
-can only use the connection when the lookup returns a key whose server name
-matches the connection's Access Variable (or its ID when none is set). The key
+can only use the connection when the query returns a row whose ``variable``
+column matches the connection's Access Variable (or its ID when none is set),
+and that row's ``key`` column is the key used. The key
 goes into headers that use ``{{MCP_KEY}}`` or ``{{<access variable>}}``, or
 else is sent as the bearer token.
 
@@ -36,9 +37,10 @@ CONFIG_KEYS = {
     'CACHE_TTL': 'mcp_key_db.cache_ttl',
     'TIMEOUT': 'mcp_key_db.timeout',
     'CONNECTION_STRING': 'mcp_key_db.connection_string',
+    'ENABLE_CONNECTION_STRING': 'mcp_key_db.enable_connection_string',
 }
 
-DEFAULT_QUERY = """SELECT DISTINCT g.Server, k.ApiKey
+DEFAULT_QUERY = """SELECT DISTINCT g.Server AS variable, k.ApiKey AS [key]
 FROM dbo.ApiKeys k
 JOIN dbo.ToolGrants g ON g.ApiKey = k.ApiKey
 WHERE k.Owner = @email"""
@@ -54,6 +56,7 @@ DEFAULTS = {
     'CACHE_TTL': 300,
     'TIMEOUT': 10,
     'CONNECTION_STRING': '',
+    'ENABLE_CONNECTION_STRING': False,
 }
 
 # Connection string keywords (ADO.NET / ODBC style), lowercased.
@@ -73,6 +76,9 @@ FAILURE_CACHE_TTL = 30
 
 EMAIL_PLACEHOLDER_RE = re.compile(r'@email\b', re.IGNORECASE)
 
+# Column names the query must return, matched case-insensitively.
+RESULT_COLUMNS = ('variable', 'key')
+
 # Lets a connection's custom headers carry the key, e.g. X-Api-Key: {{MCP_KEY}}.
 KEY_PLACEHOLDER_RE = re.compile(r'\{\{\s*MCP_KEY\s*\}\}')
 
@@ -86,10 +92,14 @@ class McpKeyDbError(Exception):
 
 async def get_settings() -> dict[str, Any]:
     values = await Config.get_many(*CONFIG_KEYS.values())
-    return {
+    settings = {
         field: values[storage_key] if values.get(storage_key) is not None else DEFAULTS[field]
         for field, storage_key in CONFIG_KEYS.items()
     }
+    # Before the toggle existed, a saved connection string was always used.
+    if values.get(CONFIG_KEYS['ENABLE_CONNECTION_STRING']) is None:
+        settings['ENABLE_CONNECTION_STRING'] = bool(str(settings['CONNECTION_STRING'] or '').strip())
+    return settings
 
 
 def clear_cache() -> None:
@@ -242,10 +252,12 @@ def restore_connection_string(connection_string: str, saved: str) -> str:
 
 
 def effective_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    """Settings with the connection string, when set, overriding the separate fields."""
+    """Settings with the connection string, when enabled, overriding the separate fields."""
     connection_string = str(settings.get('CONNECTION_STRING') or '').strip()
-    if not connection_string:
+    if not settings.get('ENABLE_CONNECTION_STRING'):
         return settings
+    if not connection_string:
+        raise McpKeyDbError('The connection string is enabled but empty')
     overrides, _ = parse_connection_string(connection_string)
     return {**settings, **overrides}
 
@@ -260,10 +272,10 @@ def to_pyformat(query: str) -> str:
 
 
 def rows_to_entitlements(rows: list) -> dict[str, str]:
-    """Map rows of (server, key) to {server: key}.
+    """Map rows of (variable, key) to {variable: key}.
 
     Rows missing either value are skipped. When several keys grant the same
-    server, the lowest key is used so the choice is stable between lookups.
+    variable, the lowest key is used so the choice is stable between lookups.
     """
     entitlements: dict[str, str] = {}
     conflicts: set[str] = set()
@@ -304,9 +316,22 @@ def _query_rows(settings: dict[str, Any], email: str) -> list:
     try:
         cursor = conn.cursor()
         cursor.execute(to_pyformat(settings['QUERY']), {'email': email})
-        return cursor.fetchall()
+        return select_result_columns(cursor.description, cursor.fetchall())
     finally:
         conn.close()
+
+
+def select_result_columns(description, rows: list) -> list[tuple]:
+    """Pick the ``variable`` and ``key`` columns, by name, from a query result."""
+    columns = [str(column[0] or '').strip().casefold() for column in (description or [])]
+    missing = [name for name in RESULT_COLUMNS if name not in columns]
+    if missing:
+        raise McpKeyDbError(
+            'The query must return columns named "variable" and "key" '
+            f'(missing: {", ".join(missing)}; got: {", ".join(columns) or "none"})'
+        )
+    indexes = [columns.index(name) for name in RESULT_COLUMNS]
+    return [tuple(row[i] for i in indexes) for row in rows]
 
 
 async def fetch_entitlements(settings: dict[str, Any], email: str) -> dict[str, str]:

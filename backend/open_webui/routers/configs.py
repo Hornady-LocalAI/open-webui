@@ -738,9 +738,11 @@ class McpKeyDbConfigForm(BaseModel):
     QUERY: str = mcp_key_db.DEFAULT_QUERY
     CACHE_TTL: int = 300
     TIMEOUT: int = 10
-    # When set, overrides HOST/PORT/DATABASE/USERNAME/PASSWORD. Its password is
-    # sent to the browser masked, and the mask is swapped back on save.
+    # Its password is sent to the browser masked, and the mask is swapped back on save.
     CONNECTION_STRING: str = ''
+    # When on, CONNECTION_STRING overrides HOST/PORT/DATABASE/USERNAME/PASSWORD.
+    # None keeps the saved choice.
+    ENABLE_CONNECTION_STRING: bool | None = None
 
 
 class McpKeyDbTestForm(McpKeyDbConfigForm):
@@ -762,14 +764,18 @@ async def merge_mcp_key_db_settings(form_data: McpKeyDbConfigForm) -> dict:
     settings['HOST'] = settings['HOST'].strip()
     settings['CACHE_TTL'] = max(settings['CACHE_TTL'], 0)
     settings['TIMEOUT'] = min(max(settings['TIMEOUT'], 1), 60)
+    if settings['ENABLE_CONNECTION_STRING'] is None:
+        settings['ENABLE_CONNECTION_STRING'] = saved['ENABLE_CONNECTION_STRING']
 
     connection_string = settings['CONNECTION_STRING'].strip()
-    if connection_string:
-        try:
+    try:
+        if connection_string:
             connection_string = mcp_key_db.restore_connection_string(connection_string, saved['CONNECTION_STRING'])
             mcp_key_db.parse_connection_string(connection_string)
-        except mcp_key_db.McpKeyDbError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        elif settings['ENABLE_CONNECTION_STRING']:
+            raise mcp_key_db.McpKeyDbError('Enter a connection string, or turn the connection string off')
+    except mcp_key_db.McpKeyDbError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     settings['CONNECTION_STRING'] = connection_string
     return settings
 
@@ -803,7 +809,7 @@ async def test_mcp_key_db_config(request: Request, form_data: McpKeyDbTestForm, 
         raise HTTPException(status_code=400, detail=f'Database test failed: {type(e).__name__}: {e}')
 
     ignored = []
-    if settings['CONNECTION_STRING']:
+    if settings['ENABLE_CONNECTION_STRING'] and settings['CONNECTION_STRING']:
         ignored = mcp_key_db.parse_connection_string(settings['CONNECTION_STRING'])[1]
     return {'email': email, 'servers': sorted(entitlements), 'ignored_options': ignored}
 
